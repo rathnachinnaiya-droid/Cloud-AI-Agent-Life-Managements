@@ -1,0 +1,53 @@
+import os,time,collections,core
+from fastapi import FastAPI,Depends,Header,Request
+from fastapi.responses import JSONResponse,Response
+from fastapi.staticfiles import StaticFiles
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):  # Azure Application Insights / Monitor
+    from azure.monitor.opentelemetry import configure_azure_monitor;configure_azure_monitor()
+app=FastAPI(title="Cloud AI Agent Control Platform")
+@app.exception_handler(core.Err)
+async def _e(r,e): return JSONResponse({"detail":e.msg},status_code=e.code)
+H=collections.defaultdict(list)
+def limit(r:Request):  # in-memory per-IP rate limit; use API Management / Front Door at scale
+    t=time.time();H[r.client.host]=h=[i for i in H[r.client.host] if t-i<60]+[t]
+    if len(h)>30: raise core.Err(429,"Too many requests")
+def user(authorization:str=Header("")): return core.ck(authorization.replace("Bearer ",""))
+def admin(u=Depends(user)):
+    if u["r"]!="admin": raise core.Err(403,"Admin role required")
+    return u
+if os.getenv("SEED_DEMO","1")=="1": core.seed()
+@app.post("/api/register")
+def reg(d:dict,_=Depends(limit)): return core.register(d)
+@app.post("/api/login")
+def lg(d:dict,_=Depends(limit)): return core.login(d.get("email"),d.get("password"))
+@app.get("/api/me")
+def me(u=Depends(user)): return core.me(u["c"])
+@app.get("/api/dashboard")
+def dash(u=Depends(user)): return core.dashboard(u["c"])
+@app.get("/api/monitor")
+def mon(u=Depends(user)): return core.monitor(u["c"])
+@app.get("/api/agents")
+def ags(u=Depends(user)): return core.list_agents(u["c"])
+@app.post("/api/agents")
+def addag(d:dict,u=Depends(admin)): return {"agent_id":core.add_agent(u["c"],d)}
+@app.delete("/api/agents/{aid}")
+def delag(aid:str,u=Depends(admin)): core.delete_agent(u["c"],aid);return {"ok":True}
+@app.get("/api/agents/{aid}/logs")
+def aglogs(aid:str,u=Depends(user)): return core.agent_logs(u["c"],aid)
+@app.post("/api/agents/{aid}/run")
+def run(aid:str,d:dict,u=Depends(admin)): return core.run_task(u["c"],aid,d.get("task"))
+@app.post("/api/agents/{aid}/{act}")
+def ctl(aid:str,act:str,u=Depends(admin)): core.control(u["c"],aid,act);return core.get_agent(u["c"],aid)
+@app.get("/api/rules")
+def rl(u=Depends(user)): return core.list_rules(u["c"])
+@app.post("/api/rules")
+def rlc(d:dict,u=Depends(admin)): return {"rule_id":core.save_rule(u["c"],d)}
+@app.put("/api/rules/{rid}")
+def rlu(rid:str,d:dict,u=Depends(admin)): return {"rule_id":core.save_rule(u["c"],d,rid)}
+@app.delete("/api/rules/{rid}")
+def rld(rid:str,u=Depends(admin)): core.del_rule(u["c"],rid);return {"ok":True}
+@app.get("/api/billing")
+def bill(u=Depends(user)): return core.billing(u["c"])
+@app.get("/api/report.csv")
+def rep(days:int=30,u=Depends(user)): return Response(core.report(u["c"],days),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=report.csv"})
+app.mount("/",StaticFiles(directory=os.path.join(os.path.dirname(__file__),"..","frontend"),html=True))
